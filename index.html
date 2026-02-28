@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Non Binary Fairy's Pizza Surfing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global context and constants
+        const BASE_URL = 'https://raw.githubusercontent.com/conblau97/NBFPS/main/';
+        
+        const ASSETS = {
+            images: {
+                avanzar: BASE_URL + 'avanzar.gif',
+                explosion: BASE_URL + 'explosion.gif',
+                rock: BASE_URL + 'rock.png',
+                powerup: BASE_URL + 'powerup.png',
+                trophy: BASE_URL + 'trophy.png',
+                hud: BASE_URL + 'HUDcontainer.png',
+                heart: BASE_URL + 'heart.png',
+                logo: BASE_URL + 'LOGO.png',
+                agua: BASE_URL + 'agua.gif',
+                splatter: BASE_URL + 'splatter.gif',
+                alien: BASE_URL + 'alien.gif',
+                movimiento: BASE_URL + 'movimiento.gif',
+                clouds: BASE_URL + 'clouds.gif',
+                sol: BASE_URL + 'sol.gif',
+                choque: BASE_URL + 'choque.png',
+                saltar: BASE_URL + 'saltar.gif',
+                bubble: BASE_URL + 'bubble.gif'
+            },
+            audio: {
+                powerup: new Audio(BASE_URL + 'powerUp.wav'),
+                collision: new Audio(BASE_URL + 'collision.mp3'),
+                explosion: new Audio(BASE_URL + 'explosion.wav'),
+                jump: new Audio(BASE_URL + 'jump.wav'),
+                soundtrack: new Audio(BASE_URL + 'soundtrack.mp3')
+            }
+        };
+
+        // Pre-configure Audio
+        ASSETS.audio.soundtrack.loop = true;
+        ASSETS.audio.soundtrack.volume = 0.5;
+
+        // Firebase Setup
+        let db, auth, currentUserId;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'nbfps-default-app';
+
+        async function initFirebase() {
+            try {
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+                if (!firebaseConfig) {
+                    console.log("Modo local sin persistencia en la nube.");
+                    return;
+                }
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                onAuthStateChanged(auth, (user) => {
+                    if (user) currentUserId = user.uid;
+                });
+            } catch (e) {
+                console.error("Firebase init error:", e);
+            }
+        }
+
+        // --- GAME ENGINE ---
+        
+        const STATE = {
+            status: 'SPLASH', // SPLASH, PLAYING, GAMEOVER, LEADERBOARD
+            score: 0,
+            lives: 3,
+            lane: 1, // 0: Top, 1: Mid, 2: Bot
+            isJumping: false,
+            jumpTimer: 0,
+            hasShield: false,
+            shieldTimer: 0,
+            isInvincible: false,
+            invincibilityTimer: 0,
+            speedMultiplier: 1.0,
+            baseSpeed: 40, // % del contenedor por segundo
+            tickScoreCounter: 0,
+            obstacles: [], // { id, type, lane, x, element, width, realWidthSet, scored, disabled }
+            particles: [],
+            distanceSinceLastSpawn: 0, 
+            lastColumnRockCount: 0, 
+            consecutiveRockColumns: 0,
+            lastColumnAlienCount: 0, // Nueva regla para aliens
+            consecutiveAlienColumns: 0 // Nueva regla para aliens
+        };
+
+        const CONSTANTS = {
+            lanesCenterY: [16.666, 50, 83.333], 
+            lanesBottomY: [33.333, 66.666, 100], 
+            playerX: 10, 
+            playerHitWidth: 28, 
+            jumpDuration: 1200, 
+            shieldDuration: 10000, 
+            invincibilityDuration: 3000, 
+            baseSpawnDistance: 65, 
+            minSpawnDistance: 40 
+        };
+
+        // DOM Elements
+        const DOM = {
+            gameArea: null,
+            entitiesArea: null,
+            player: null,
+            playerImg: null,
+            shieldImg: null,
+            scoreDisplay: null,
+            livesDisplay: null,
+            modals: {},
+            waterBg: null,
+            clouds: null
+        };
+
+        let lastTime = 0;
+        let animationFrameId;
+
+        window.onload = async () => {
+            await initFirebase();
+            setupDOM();
+            setupInput();
+            showModal('splash');
+            createBackground();
+            
+            // Start Loop
+            requestAnimationFrame(gameLoop);
+        };
+
+        function setupDOM() {
+            DOM.gameArea = document.getElementById('game-container');
+            DOM.entitiesArea = document.getElementById('entities-container');
+            DOM.player = document.getElementById('player');
+            DOM.playerImg = document.getElementById('player-img');
+            DOM.shieldImg = document.getElementById('shield-img');
+            DOM.scoreDisplay = document.getElementById('hud-score');
+            DOM.livesDisplay = document.getElementById('hud-lives');
+            
+            DOM.modals.splash = document.getElementById('modal-splash');
+            DOM.modals.gameover = document.getElementById('modal-gameover');
+            DOM.modals.leaderboard = document.getElementById('modal-leaderboard');
+            
+            DOM.waterBg = document.getElementById('water-bg');
+            DOM.clouds = document.getElementById('clouds-bg');
+            
+            // Buttons
+            document.getElementById('btn-start').onclick = startGame;
+            document.getElementById('btn-leaderboard').onclick = () => showModal('leaderboard');
+            document.getElementById('btn-close-lb').onclick = () => {
+                if(STATE.status === 'GAMEOVER') showModal('gameover');
+                else showModal('splash');
+            };
+            document.getElementById('btn-submit-score').onclick = submitScore;
+            document.getElementById('btn-play-again').onclick = startGame;
+        }
+
+        function createBackground() {
+            DOM.waterBg.style.backgroundImage = `url('${ASSETS.images.agua}')`;
+            DOM.clouds.style.backgroundImage = `url('${ASSETS.images.clouds}')`;
+        }
+
+        function playSound(sound) {
+            try {
+                sound.currentTime = 0;
+                sound.play().catch(e => console.log("Audio block:", e));
+            } catch(e){}
+        }
+
+        function startGame() {
+            // Reset state
+            STATE.status = 'PLAYING';
+            STATE.score = 0;
+            STATE.lives = 3;
+            STATE.lane = 1;
+            STATE.isJumping = false;
+            STATE.hasShield = false;
+            STATE.isInvincible = false;
+            STATE.speedMultiplier = 1.0;
+            STATE.tickScoreCounter = 0;
+            STATE.distanceSinceLastSpawn = CONSTANTS.baseSpawnDistance;
+            STATE.lastColumnRockCount = 0;
+            STATE.consecutiveRockColumns = 0;
+            STATE.lastColumnAlienCount = 0;
+            STATE.consecutiveAlienColumns = 0;
+            
+            // Clear entities
+            STATE.obstacles.forEach(obs => obs.element.remove());
+            STATE.obstacles = [];
+            STATE.particles.forEach(p => p.element.remove());
+            STATE.particles = [];
+
+            // Mostrar jugador y resetear sprite a su estado original
+            DOM.player.classList.remove('hidden');
+            DOM.playerImg.src = ASSETS.images.avanzar;
+
+            // Mostrar HUD
+            document.getElementById('hud-wrapper').classList.remove('hidden');
+
+            updatePlayerVisuals();
+            updateHUD();
+            
+            // Hide Modals
+            document.querySelectorAll('.modal-overlay').forEach(el => el.classList.add('hidden'));
+
+            // Start Audio
+            ASSETS.audio.soundtrack.play().catch(e=>console.log("Auto-play blocked"));
+        }
+
+        function handleHit() {
+            if (STATE.isInvincible) return;
+            if (STATE.hasShield) return;
+
+            playSound(ASSETS.audio.collision);
+            STATE.lives--;
+            updateHUD();
+
+            if (STATE.lives <= 0) {
+                gameOver();
+            } else {
+                STATE.lane = 1;
+                STATE.isInvincible = true;
+                STATE.invincibilityTimer = CONSTANTS.invincibilityDuration;
+                STATE.speedMultiplier = 1.0; 
+                
+                STATE.obstacles.forEach(obs => obs.element.remove());
+                STATE.obstacles = [];
+
+                updatePlayerVisuals();
+            }
+        }
+
+        function gameOver() {
+            STATE.status = 'GAMEOVER';
+            ASSETS.audio.soundtrack.pause();
+            document.getElementById('final-score').innerText = String(Math.floor(STATE.score)).padStart(6, '0');
+            DOM.player.classList.add('hidden'); 
+            showModal('gameover');
+        }
+
+        // --- INPUT HANDLING ---
+        function setupInput() {
+            // Keyboard
+            window.addEventListener('keydown', (e) => {
+                if (STATE.status !== 'PLAYING') return;
+                if (e.repeat) return; 
+                
+                if (e.key === 'ArrowUp' || e.key === 'w') moveLane(-1);
+                if (e.key === 'ArrowDown' || e.key === 's') moveLane(1);
+                if (e.key === ' ' || e.key === 'Enter') jump();
+            });
+
+            // Touch Gestures (Swipe vs Tap)
+            let touchStartX = 0;
+            let touchStartY = 0;
+
+            window.addEventListener('touchstart', (e) => {
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+            }, { passive: false });
+
+            // Prevenir scroll nativo que arruina el swipe en mobile
+            window.addEventListener('touchmove', (e) => {
+                if (STATE.status === 'PLAYING') {
+                    e.preventDefault(); 
+                }
+            }, { passive: false });
+
+            window.addEventListener('touchend', (e) => {
+                if (STATE.status !== 'PLAYING') return;
+                
+                let touchEndX = e.changedTouches[0].clientX;
+                let touchEndY = e.changedTouches[0].clientY;
+                
+                let diffX = touchStartX - touchEndX;
+                let diffY = touchStartY - touchEndY;
+                
+                // Si el movimiento vertical es claro y más largo que el horizontal, es Swipe
+                if (Math.abs(diffY) > 30 && Math.abs(diffY) > Math.abs(diffX)) {
+                    if (diffY > 0) moveLane(-1); // Swipe Up
+                    else moveLane(1); // Swipe Down
+                } else if (Math.abs(diffY) < 20 && Math.abs(diffX) < 20) {
+                    jump(); // Tap ligero sin mucho arrastre
+                }
+            });
+        }
+
+        function moveLane(dir) {
+            if (STATE.isJumping) return;
+            const newLane = STATE.lane + dir;
+            if (newLane >= 0 && newLane <= 2) {
+                STATE.lane = newLane;
+                DOM.playerImg.src = ASSETS.images.movimiento + "?t=" + Date.now();
+                setTimeout(() => {
+                    if (!STATE.isJumping && STATE.status === 'PLAYING') {
+                        DOM.playerImg.src = ASSETS.images.avanzar;
+                    }
+                }, 300);
+                updatePlayerVisuals();
+            }
+        }
+
+        function jump() {
+            if (STATE.isJumping) return;
+            STATE.isJumping = true;
+            STATE.jumpTimer = CONSTANTS.jumpDuration;
+            playSound(ASSETS.audio.jump);
+            updatePlayerVisuals();
+        }
+
+        function updatePlayerVisuals() {
+            const yPos = CONSTANTS.lanesCenterY[STATE.lane];
+            DOM.player.style.top = `${yPos}%`;
+            DOM.player.style.zIndex = STATE.lane * 10 + 10;
+            
+            const spriteWrapper = document.getElementById('player-sprite-wrapper');
+
+            if (STATE.isJumping) {
+                DOM.playerImg.src = ASSETS.images.saltar;
+                spriteWrapper.style.transform = `translateY(-130%) scale(1.15)`; 
+                DOM.player.style.zIndex = STATE.lane * 10 + 15; 
+            } else {
+                if(DOM.playerImg.src.indexOf(ASSETS.images.saltar) !== -1) {
+                   DOM.playerImg.src = ASSETS.images.avanzar;
+                }
+                spriteWrapper.style.transform = `translateY(0) scale(1)`;
+            }
+
+            if (STATE.hasShield) {
+                DOM.shieldImg.src = ASSETS.images.bubble;
+                DOM.shieldImg.classList.remove('hidden');
+            } else {
+                DOM.shieldImg.classList.add('hidden');
+            }
+
+            if (STATE.isInvincible) {
+                DOM.player.classList.add('opacity-50', 'animate-pulse');
+            } else {
+                DOM.player.classList.remove('opacity-50', 'animate-pulse');
+            }
+        }
+
+        function updateHUD() {
+            DOM.scoreDisplay.innerText = String(Math.floor(STATE.score)).padStart(6, '0');
+            
+            DOM.livesDisplay.innerHTML = '';
+            for(let i=0; i<3; i++) {
+                const heart = document.createElement('img');
+                heart.src = ASSETS.images.heart;
+                heart.className = `w-3 h-3 md:w-4 md:h-4 object-contain ${i >= STATE.lives ? 'grayscale opacity-50' : ''}`;
+                DOM.livesDisplay.appendChild(heart);
+            }
+        }
+
+        // --- GAME LOOP ---
+        function gameLoop(timestamp) {
+            if (!lastTime) lastTime = timestamp;
+            const dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            if (STATE.status === 'PLAYING') {
+                updateGame(dt);
+            }
+
+            const scrollSpeed = STATE.status === 'PLAYING' ? (0.1 * STATE.speedMultiplier) : 0.02;
+            let currentBgPos = parseFloat(DOM.waterBg.style.backgroundPositionX || 0);
+            DOM.waterBg.style.backgroundPositionX = `${currentBgPos - scrollSpeed}%`;
+            
+            let currentCloudsPos = parseFloat(DOM.clouds.style.backgroundPositionX || 0);
+            DOM.clouds.style.backgroundPositionX = `${currentCloudsPos - (scrollSpeed * 0.3)}%`;
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function updateGame(dt) {
+            STATE.tickScoreCounter += dt;
+            if (STATE.tickScoreCounter >= 100) { 
+                STATE.score += 1;
+                STATE.tickScoreCounter = 0;
+                updateHUD();
+                
+                if (STATE.score > 0 && STATE.score % 500 === 0) {
+                    STATE.speedMultiplier += 0.1;
+                }
+            }
+
+            if (STATE.isJumping) {
+                STATE.jumpTimer -= dt;
+                if (STATE.jumpTimer <= 0) {
+                    STATE.isJumping = false;
+                    updatePlayerVisuals();
+                }
+            }
+
+            if (STATE.hasShield) {
+                STATE.shieldTimer -= dt;
+                if (STATE.shieldTimer <= 0) {
+                    STATE.hasShield = false;
+                    updatePlayerVisuals();
+                }
+            }
+
+            if (STATE.isInvincible) {
+                STATE.invincibilityTimer -= dt;
+                if (STATE.invincibilityTimer <= 0) {
+                    STATE.isInvincible = false;
+                    updatePlayerVisuals();
+                }
+            }
+
+            const moveAmt = (STATE.baseSpeed * STATE.speedMultiplier * dt) / 1000;
+            STATE.distanceSinceLastSpawn += moveAmt;
+
+            let currentSpawnDist = Math.max(CONSTANTS.minSpawnDistance, CONSTANTS.baseSpawnDistance - (STATE.speedMultiplier * 5));
+
+            if (STATE.distanceSinceLastSpawn >= currentSpawnDist) {
+                spawnColumn();
+                STATE.distanceSinceLastSpawn = 0;
+            }
+
+            moveAndCheckObstacles(dt, moveAmt);
+            cleanupParticles(dt);
+        }
+
+        function spawnColumn() {
+            let numObs = Math.random() > 0.6 ? 2 : 1; 
+
+            // Reglas de Bloqueo de Rocas
+            let maxRocksAllowed = 2;
+            if (STATE.consecutiveRockColumns >= 2) maxRocksAllowed = 0; 
+            else if (STATE.lastColumnRockCount === 2) maxRocksAllowed = 0; 
+            else if (STATE.lastColumnRockCount >= 1) maxRocksAllowed = 1; 
+
+            // Reglas de Bloqueo de Aliens (Idénticas)
+            let maxAliensAllowed = 2;
+            if (STATE.consecutiveAlienColumns >= 2) maxAliensAllowed = 0;
+            else if (STATE.lastColumnAlienCount === 2) maxAliensAllowed = 0;
+            else if (STATE.lastColumnAlienCount >= 1) maxAliensAllowed = 1;
+
+            let currentRockCount = 0;
+            let currentAlienCount = 0;
+
+            let availableLanes = [0, 1, 2];
+            availableLanes.sort(() => 0.5 - Math.random());
+
+            for (let i = 0; i < numObs; i++) {
+                const lane = availableLanes[i];
+                let type = 'rock';
+
+                let rand = Math.random();
+                if (rand < 0.015) { 
+                    type = 'powerup'; 
+                } else if (rand < 0.45) {
+                    if (currentAlienCount < maxAliensAllowed) { type = 'alien'; currentAlienCount++; }
+                    else if (currentRockCount < maxRocksAllowed) { type = 'rock'; currentRockCount++; }
+                    else { type = 'powerup'; }
+                } else {
+                    if (currentRockCount < maxRocksAllowed) { type = 'rock'; currentRockCount++; }
+                    else if (currentAlienCount < maxAliensAllowed) { type = 'alien'; currentAlienCount++; }
+                    else { type = 'powerup'; }
+                }
+
+                spawnEntity(type, lane);
+            }
+            
+            // Actualizar trackers
+            if (currentRockCount > 0) STATE.consecutiveRockColumns++;
+            else STATE.consecutiveRockColumns = 0;
+            STATE.lastColumnRockCount = currentRockCount;
+
+            if (currentAlienCount > 0) STATE.consecutiveAlienColumns++;
+            else STATE.consecutiveAlienColumns = 0;
+            STATE.lastColumnAlienCount = currentAlienCount;
+        }
+
+        function spawnEntity(type, lane) {
+            const el = document.createElement('img');
+            
+            let hitWidth = 12; 
+            el.className = `absolute object-contain transition-none`;
+            el.style.left = '100%';
+            
+            if (type === 'rock') {
+                el.src = ASSETS.images.rock;
+                el.style.height = '45%'; 
+                el.style.top = `${CONSTANTS.lanesBottomY[lane]}%`;
+                el.style.transform = `translateY(-100%)`; 
+                hitWidth = 18;
+            } else if (type === 'alien') {
+                el.src = ASSETS.images.alien;
+                el.style.height = '13.333%'; 
+                el.style.top = `${CONSTANTS.lanesCenterY[lane]}%`;
+                el.style.transform = `translateY(-50%)`; 
+                hitWidth = 6; // Hitbox reducido para el alien (más justo)
+            } else if (type === 'powerup') {
+                el.src = ASSETS.images.powerup;
+                el.style.height = '10%'; 
+                el.style.top = `${CONSTANTS.lanesCenterY[lane]}%`;
+                el.style.transform = `translateY(-50%)`; 
+                el.style.filter = `drop-shadow(0 0 5px yellow)`; 
+                hitWidth = 5;
+            }
+            
+            el.style.zIndex = lane * 10 + 10; 
+            DOM.entitiesArea.appendChild(el);
+            
+            STATE.obstacles.push({
+                id: Math.random(),
+                type: type,
+                lane: lane,
+                x: 100, 
+                element: el,
+                width: hitWidth,
+                realWidthSet: false, 
+                scored: false, 
+                disabled: false // Nueva propiedad para anular el hitbox
+            });
+        }
+
+        function moveAndCheckObstacles(dt, moveAmt) {
+            for (let i = STATE.obstacles.length - 1; i >= 0; i--) {
+                const obs = STATE.obstacles[i];
+                if (!obs) continue; 
+
+                if (!obs.realWidthSet && obs.element.clientWidth > 0) {
+                    obs.width = (obs.element.clientWidth / DOM.entitiesArea.clientWidth) * 100;
+                    obs.realWidthSet = true;
+                }
+
+                obs.x -= moveAmt;
+                obs.element.style.left = `${obs.x}%`;
+
+                // Colisión ignora obstáculos disabled (Aliens saltados con éxito)
+                let isOverlapping = (!obs.disabled && obs.x < CONSTANTS.playerX + CONSTANTS.playerHitWidth && obs.x + obs.width > CONSTANTS.playerX);
+                
+                if (isOverlapping && obs.lane === STATE.lane) {
+                    handleCollision(obs, i);
+                }
+
+                if (STATE.status !== 'PLAYING' || STATE.obstacles.length === 0) break;
+
+                if (STATE.obstacles.includes(obs) && obs.x < - (obs.width || 20)) {
+                    obs.element.remove();
+                    const idx = STATE.obstacles.indexOf(obs);
+                    if (idx > -1) STATE.obstacles.splice(idx, 1);
+                }
+            }
+        }
+
+        function createSkyText(text, color) {
+            const el = document.createElement('div');
+            el.innerHTML = text;
+            el.className = 'absolute font-bold text-xl md:text-2xl text-center z-[100] pointer-events-none tracking-widest leading-tight w-full left-0';
+            el.style.color = color;
+            el.style.top = `35%`; // Comienza a la altura del horizonte
+            el.style.transform = `translateY(-50%)`;
+            el.style.textShadow = '2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000';
+            el.style.transition = 'all 1s cubic-bezier(0.25, 1, 0.5, 1)';
+            
+            DOM.gameArea.appendChild(el);
+
+            // Animar flotación hacia el cielo
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    el.style.top = `15%`; // Sube hacia las nubes
+                    el.style.opacity = '0';
+                });
+            });
+
+            setTimeout(() => {
+                el.remove();
+            }, 1000);
+        }
+
+        function handleCollision(obs, index) {
+            const removeObstacle = () => {
+                obs.element.remove();
+                const idx = STATE.obstacles.indexOf(obs);
+                if (idx > -1) STATE.obstacles.splice(idx, 1);
+            };
+
+            if (obs.type === 'powerup') {
+                playSound(ASSETS.audio.powerup);
+                STATE.score += 50;
+                STATE.hasShield = true;
+                STATE.shieldTimer = CONSTANTS.shieldDuration;
+                updateHUD();
+                updatePlayerVisuals();
+                createSkyText("BUBBLE SHIELD!<br>+50", "#00E5FF");
+                removeObstacle();
+                return;
+            }
+
+            if (obs.type === 'alien' && STATE.isJumping) {
+                // ALIEN JUMP CONSEGUIDO! 
+                if (!obs.scored) {
+                    STATE.score += 100;
+                    playSound(ASSETS.audio.jump); 
+                    updateHUD();
+                    
+                    obs.scored = true;
+                    obs.disabled = true; // 1. Desaparece el hitbox
+                    createSkyText("ALIEN JUMP!<br>+100", "#FFF110"); 
+                }
+                return; 
+            }
+
+            // Impacto recibido
+            if (STATE.hasShield) {
+                STATE.score += 100;
+                // Audios diferenciados
+                playSound(obs.type === 'rock' ? ASSETS.audio.explosion : ASSETS.audio.collision);
+                createSkyText("BOOM!<br>+100", "#FFA500");
+                createParticle(obs.type === 'alien' ? 'splatter' : 'explosion', obs.x, obs.lane);
+                updateHUD();
+                removeObstacle();
+            } else if (!STATE.isInvincible) {
+                DOM.playerImg.src = ASSETS.images.choque + "?t=" + Date.now();
+                setTimeout(() => {
+                    if (STATE.status === 'PLAYING' && !STATE.isJumping) {
+                        DOM.playerImg.src = ASSETS.images.avanzar;
+                    }
+                }, 500);
+                
+                // Audios y texto rojo de "YOU SUCK"
+                playSound(obs.type === 'rock' ? ASSETS.audio.explosion : ASSETS.audio.collision);
+                createSkyText("YOU SUCK!", "#FF0000");
+                
+                createParticle(obs.type === 'alien' ? 'splatter' : 'explosion', obs.x, obs.lane);
+                handleHit(); 
+            }
+        }
+
+        function createParticle(type, x, lane) {
+            const el = document.createElement('img');
+            el.src = ASSETS.images[type] + "?t=" + Date.now();
+            el.className = 'absolute object-contain z-50';
+            el.style.left = `${x}%`;
+            
+            if (type === 'explosion') {
+                el.style.height = '45%'; 
+                el.style.top = `${CONSTANTS.lanesBottomY[lane]}%`;
+                el.style.transform = `translateY(-100%)`; 
+            } else if (type === 'splatter') {
+                el.style.height = '20%'; 
+                el.style.top = `${CONSTANTS.lanesCenterY[lane]}%`;
+                el.style.transform = `translateY(-100%)`; 
+            }
+            
+            DOM.entitiesArea.appendChild(el);
+            
+            STATE.particles.push({
+                element: el,
+                timer: 500 
+            });
+        }
+
+        function cleanupParticles(dt) {
+            for (let i = STATE.particles.length - 1; i >= 0; i--) {
+                STATE.particles[i].timer -= dt;
+                if (STATE.particles[i].timer <= 0) {
+                    STATE.particles[i].element.remove();
+                    STATE.particles.splice(i, 1);
+                }
+            }
+        }
+
+        // --- UI & DATA HANDLING ---
+        function showModal(id) {
+            document.querySelectorAll('.modal-overlay').forEach(el => el.classList.add('hidden'));
+            if (DOM.player) DOM.player.classList.add('hidden'); 
+
+            if (id) {
+                document.getElementById(`modal-${id}`).classList.remove('hidden');
+                
+                if (id === 'splash') {
+                    const hud = document.getElementById('hud-wrapper');
+                    if (hud) hud.classList.add('hidden');
+                }
+
+                if (id === 'leaderboard') loadLeaderboard();
+            }
+        }
+
+        async function submitScore() {
+            const nameInput = document.getElementById('input-name').value.trim().toUpperCase();
+            if (!nameInput || nameInput.length > 5) {
+                alert("Por favor ingresa un nombre de máximo 5 caracteres.");
+                return;
+            }
+
+            document.getElementById('btn-submit-score').innerText = "SAVING...";
+            document.getElementById('btn-submit-score').disabled = true;
+
+            const scoreData = {
+                timestamp: new Date().toISOString(),
+                username: nameInput,
+                score: Math.floor(STATE.score)
+            };
+
+            try {
+                if (db) {
+                    const lbRef = collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard');
+                    await addDoc(lbRef, scoreData);
+                } else {
+                    let localScores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
+                    localScores.push(scoreData);
+                    localStorage.setItem('nbfps_scores', JSON.stringify(localScores));
+                }
+            } catch (e) {
+                console.error("Error saving score:", e);
+            }
+
+            document.getElementById('btn-submit-score').innerText = "SUBMIT";
+            document.getElementById('btn-submit-score').disabled = false;
+            
+            showModal('leaderboard');
+        }
+
+        async function loadLeaderboard() {
+            const listEl = document.getElementById('leaderboard-list');
+            listEl.innerHTML = '<p class="text-center text-xs">LOADING...</p>';
+
+            let scores = [];
+
+            try {
+                if (db) {
+                    const lbRef = collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard');
+                    const snapshot = await getDocs(lbRef);
+                    snapshot.forEach(doc => {
+                        scores.push(doc.data());
+                    });
+                } else {
+                    scores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
+                }
+            } catch (e) {
+                console.error("Error loading scores:", e);
+                scores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
+            }
+
+            scores.sort((a, b) => b.score - a.score);
+            const top5 = scores.slice(0, 5);
+
+            listEl.innerHTML = '';
+            if (top5.length === 0) {
+                listEl.innerHTML = '<p class="text-center text-xs text-gray-400">NO SCORES YET</p>';
+                return;
+            }
+
+            top5.forEach((entry, index) => {
+                const row = document.createElement('div');
+                row.className = `flex justify-between items-center py-2 text-xs md:text-sm ${index === 0 ? 'text-black font-bold' : 'text-gray-500'}`;
+                
+                const rankName = document.createElement('div');
+                rankName.innerText = `${index + 1}.${entry.username.padEnd(5, ' ')}`;
+                
+                const scoreBox = document.createElement('div');
+                scoreBox.className = "flex items-center gap-2";
+                scoreBox.innerText = String(entry.score).padStart(6, '0');
+                
+                if (index === 0) {
+                    const trophy = document.createElement('img');
+                    trophy.src = ASSETS.images.trophy;
+                    trophy.className = "w-4 h-4 inline";
+                    scoreBox.appendChild(trophy);
+                }
+
+                row.appendChild(rankName);
+                row.appendChild(scoreBox);
+                listEl.appendChild(row);
+            });
+        }
+    </script>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #A9E5FF;
+            touch-action: none;
+            font-family: 'Press Start 2P', monospace;
+        }
+
+        img {
+            image-rendering: pixelated;
+        }
+
+        .pixel-border {
+            border: 4px solid black;
+            box-shadow: 4px 4px 0px rgba(0,0,0,0.2);
+        }
+
+        #mobile-container {
+            width: 100%;
+            height: 100%;
+            max-width: 430px; 
+            max-height: 932px;
+            background-color: #A9E5FF;
+            position: relative;
+            overflow: hidden;
+        }
+
+        @media (min-width: 431px) {
+            #mobile-container {
+                height: 90dvh;
+                border: 4px solid black;
+                border-radius: 1rem;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            }
+        }
+    </style>
+</head>
+<body class="bg-[#374151] flex justify-center items-center h-[100dvh] w-screen overflow-hidden select-none touch-none m-0 font-['Press_Start_2P']">
+
+    <div id="mobile-container">
+        <!-- GAME BACKGROUND -->
+        <div id="game-container" class="absolute inset-0 w-full h-full overflow-hidden">
+            
+            <div class="absolute top-0 w-full h-[40%] bg-[#A9E5FF] z-0">
+                <img src="https://raw.githubusercontent.com/conblau97/NBFPS/main/sol.gif" class="absolute top-[22%] right-8 w-20 h-20 md:w-24 md:h-24 object-contain opacity-90">
+                <div id="clouds-bg" class="absolute bottom-0 w-full h-full bg-repeat-x opacity-80" style="background-size: auto 100%; background-position-y: bottom;"></div>
+            </div>
+
+            <div id="water-bg" class="absolute bottom-0 w-full h-[60%] bg-repeat z-10" style="background-size: auto 33.3333%; background-position: top left;"></div>
+
+            <div id="entities-container" class="absolute bottom-0 w-full h-[60%] z-20">
+                
+                <div id="player" class="absolute left-[10%] h-[26.666%] w-auto aspect-square transition-all duration-150 flex items-center justify-center z-20 hidden" style="top: 50%; transform: translateY(-50%);">
+                    <div id="player-sprite-wrapper" class="relative w-full h-full flex items-center justify-center transition-transform duration-150">
+                        <img id="player-img" src="https://raw.githubusercontent.com/conblau97/NBFPS/main/avanzar.gif" class="absolute h-full object-contain">
+                        <img id="shield-img" src="https://raw.githubusercontent.com/conblau97/NBFPS/main/bubble.gif" class="absolute w-[300%] h-[300%] object-contain opacity-75 hidden z-30 drop-shadow-[0_0_15px_#00E5FF]">
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- UI LAYER -->
+        <div id="ui-container" class="absolute inset-0 z-50 pointer-events-none flex flex-col items-center">
+            
+            <div id="hud-wrapper" class="w-full flex justify-center items-start pt-6 pointer-events-none z-50 px-2 relative hidden">
+                <div class="relative w-[95%] max-w-[340px] flex items-center justify-between h-14 md:h-16 pointer-events-auto mt-2">
+                    <img src="https://raw.githubusercontent.com/conblau97/NBFPS/main/HUDcontainer.png" class="absolute inset-0 w-full h-full" style="image-rendering: pixelated; object-fit: fill;">
+                    <img src="https://raw.githubusercontent.com/conblau97/NBFPS/main/LOGO.png" class="absolute left-1/2 top-0 transform -translate-x-1/2 -translate-y-[25%] w-32 md:w-40 object-contain drop-shadow-md z-20">
+                    
+                    <div class="relative z-10 w-[40%] flex flex-col items-center justify-center -mt-1 pr-6">
+                        <span class="text-[8px] font-bold text-black mb-1">LIVES</span>
+                        <div id="hud-lives" class="flex gap-1 justify-center min-h-[16px]"></div>
+                    </div>
+
+                    <div class="w-[20%] relative z-10"></div>
+
+                    <div class="relative z-10 w-[40%] flex flex-col items-center justify-center -mt-1 pl-6">
+                        <span class="text-[8px] font-bold text-black mb-1">POINTS</span>
+                        <span id="hud-score" class="text-[10px] md:text-xs font-bold tracking-widest text-black">000000</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MODALS -->
+        
+        <!-- Splash Screen -->
+        <div id="modal-splash" class="modal-overlay absolute inset-0 z-[60] flex flex-col items-center justify-center pointer-events-auto bg-[#A9E5FF]">
+            <div class="absolute inset-0 z-0 opacity-80" style="background-image: url('https://raw.githubusercontent.com/conblau97/NBFPS/main/clouds.gif'); background-size: auto 50%; background-repeat: repeat;"></div>
+            
+            <img src="https://raw.githubusercontent.com/conblau97/NBFPS/main/LOGO.png" class="relative z-10 w-64 object-contain drop-shadow-lg mb-16 animate-bounce" style="animation-duration: 3s;">
+            
+            <button id="btn-start" class="relative z-10 text-2xl text-black hover:text-white hover:drop-shadow-[0_0_8px_rgba(255,255,255,0.8)] font-bold mb-6 animate-pulse transition-all drop-shadow-md cursor-pointer text-center leading-relaxed">
+                START
+            </button>
+
+            <div class="relative z-10 text-center text-black font-bold text-[8px] md:text-[10px] mb-12 leading-loose tracking-wide opacity-80">
+                SWIPE UP OR DOWN TO MOVE<br>
+                TAP TO JUMP
+            </div>
+
+            <button id="btn-leaderboard" class="relative z-10 bg-[#FFF110] pixel-border px-4 py-2 text-xs font-bold text-black hover:bg-yellow-400 active:scale-95 transition-transform">
+                LEADERBOARD
+            </button>
+        </div>
+
+        <!-- Game Over Screen -->
+        <div id="modal-gameover" class="modal-overlay hidden absolute inset-0 z-[60] flex flex-col items-center justify-center bg-black/40 pointer-events-auto backdrop-blur-sm">
+            
+            <div class="relative w-11/12 max-w-[320px] mt-16">
+                <img src="https://raw.githubusercontent.com/conblau97/NBFPS/main/LOGO.png" class="absolute -top-16 left-1/2 transform -translate-x-1/2 w-48 object-contain z-10">
+                
+                <div class="bg-white pixel-border p-6 pt-16 flex flex-col items-center w-full">
+                    <h2 class="text-sm font-bold text-black mb-2 text-center">FINAL SCORE</h2>
+                    <div id="final-score" class="text-2xl font-bold mb-8">000000</div>
+
+                    <h3 class="text-xs font-bold mb-4 text-center">ENTER YOUR NAME</h3>
+                    <input type="text" id="input-name" maxlength="5" placeholder="_____" class="border-4 border-black p-2 text-center font-bold text-lg w-full mb-6 uppercase focus:outline-none focus:bg-gray-100 placeholder-gray-300">
+                    
+                    <button id="btn-submit-score" class="bg-black text-white px-6 py-3 pixel-border text-xs font-bold hover:bg-gray-800 active:scale-95 transition-transform w-full">
+                        SUBMIT
+                    </button>
+                </div>
+            </div>
+            
+        </div>
+
+        <!-- Leaderboard Screen -->
+        <div id="modal-leaderboard" class="modal-overlay hidden absolute inset-0 z-[60] flex flex-col items-center justify-center bg-black/40 pointer-events-auto backdrop-blur-sm">
+            
+            <div class="relative w-11/12 max-w-[320px] mt-16">
+                <img src="https://raw.githubusercontent.com/conblau97/NBFPS/main/LOGO.png" class="absolute -top-16 left-1/2 transform -translate-x-1/2 w-48 object-contain z-10">
+                
+                <div class="bg-white pixel-border p-6 pt-16 flex flex-col w-full min-h-[300px] relative">
+                    <button id="btn-close-lb" class="absolute top-2 right-2 text-gray-400 hover:text-black font-bold text-xl p-2 cursor-pointer">X</button>
+
+                    <h2 class="text-sm font-bold text-black mb-6 text-center">LEADERBOARD</h2>
+                    <div id="leaderboard-list" class="flex flex-col gap-2 mb-8 flex-1"></div>
+
+                    <button id="btn-play-again" class="border-4 border-black px-6 py-3 font-bold text-xs hover:bg-gray-100 active:scale-95 transition-transform w-full bg-white mt-auto">
+                        PLAY AGAIN
+                    </button>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+</body>
+</html>
