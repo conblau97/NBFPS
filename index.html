@@ -7,12 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     
-    <!-- Firebase SDKs -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
+    <script>
         // Global context and constants
         const BASE_URL = 'https://raw.githubusercontent.com/conblau97/NBFPS/main/';
         
@@ -49,34 +44,8 @@
         ASSETS.audio.soundtrack.loop = true;
         ASSETS.audio.soundtrack.volume = 0.5;
 
-        // Firebase Setup
-        let db, auth, currentUserId;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'nbfps-default-app';
-
-        async function initFirebase() {
-            try {
-                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-                if (!firebaseConfig) {
-                    console.log("Modo local sin persistencia en la nube.");
-                    return;
-                }
-                const app = initializeApp(firebaseConfig);
-                auth = getAuth(app);
-                db = getFirestore(app);
-
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-                
-                onAuthStateChanged(auth, (user) => {
-                    if (user) currentUserId = user.uid;
-                });
-            } catch (e) {
-                console.error("Firebase init error:", e);
-            }
-        }
+        // URL del Webhook de Google Sheets
+        const GOOGLE_SHEETS_WEBHOOK = "https://script.google.com/macros/s/AKfycby61MM3KSLCV60iMzwKWeTxN9ZCxwvnb7h4kSOxi3NENc6s1m4IU11X4Hb9EJxiCNwf/exec";
 
         // --- GAME ENGINE ---
         
@@ -99,8 +68,8 @@
             distanceSinceLastSpawn: 0, 
             lastColumnRockCount: 0, 
             consecutiveRockColumns: 0,
-            lastColumnAlienCount: 0, // Nueva regla para aliens
-            consecutiveAlienColumns: 0 // Nueva regla para aliens
+            lastColumnAlienCount: 0, 
+            consecutiveAlienColumns: 0 
         };
 
         const CONSTANTS = {
@@ -132,8 +101,7 @@
         let lastTime = 0;
         let animationFrameId;
 
-        window.onload = async () => {
-            await initFirebase();
+        window.onload = () => {
             setupDOM();
             setupInput();
             showModal('splash');
@@ -226,7 +194,6 @@
             if (STATE.isInvincible) return;
             if (STATE.hasShield) return;
 
-            playSound(ASSETS.audio.collision);
             STATE.lives--;
             updateHUD();
 
@@ -290,12 +257,11 @@
                 let diffX = touchStartX - touchEndX;
                 let diffY = touchStartY - touchEndY;
                 
-                // Si el movimiento vertical es claro y más largo que el horizontal, es Swipe
                 if (Math.abs(diffY) > 30 && Math.abs(diffY) > Math.abs(diffX)) {
                     if (diffY > 0) moveLane(-1); // Swipe Up
                     else moveLane(1); // Swipe Down
                 } else if (Math.abs(diffY) < 20 && Math.abs(diffX) < 20) {
-                    jump(); // Tap ligero sin mucho arrastre
+                    jump(); // Tap ligero
                 }
             });
         }
@@ -446,7 +412,7 @@
             else if (STATE.lastColumnRockCount === 2) maxRocksAllowed = 0; 
             else if (STATE.lastColumnRockCount >= 1) maxRocksAllowed = 1; 
 
-            // Reglas de Bloqueo de Aliens (Idénticas)
+            // Reglas de Bloqueo de Aliens
             let maxAliensAllowed = 2;
             if (STATE.consecutiveAlienColumns >= 2) maxAliensAllowed = 0;
             else if (STATE.lastColumnAlienCount === 2) maxAliensAllowed = 0;
@@ -506,7 +472,7 @@
                 el.style.height = '13.333%'; 
                 el.style.top = `${CONSTANTS.lanesCenterY[lane]}%`;
                 el.style.transform = `translateY(-50%)`; 
-                hitWidth = 6; // Hitbox reducido para el alien (más justo)
+                hitWidth = 6;
             } else if (type === 'powerup') {
                 el.src = ASSETS.images.powerup;
                 el.style.height = '10%'; 
@@ -528,7 +494,7 @@
                 width: hitWidth,
                 realWidthSet: false, 
                 scored: false, 
-                disabled: false // Nueva propiedad para anular el hitbox
+                disabled: false 
             });
         }
 
@@ -545,7 +511,6 @@
                 obs.x -= moveAmt;
                 obs.element.style.left = `${obs.x}%`;
 
-                // Colisión ignora obstáculos disabled (Aliens saltados con éxito)
                 let isOverlapping = (!obs.disabled && obs.x < CONSTANTS.playerX + CONSTANTS.playerHitWidth && obs.x + obs.width > CONSTANTS.playerX);
                 
                 if (isOverlapping && obs.lane === STATE.lane) {
@@ -567,24 +532,26 @@
             el.innerHTML = text;
             el.className = 'absolute font-bold text-xl md:text-2xl text-center z-[100] pointer-events-none tracking-widest leading-tight w-full left-0';
             el.style.color = color;
-            el.style.top = `35%`; // Comienza a la altura del horizonte
+            el.style.top = `35%`; // Comienza más abajo (horizonte)
             el.style.transform = `translateY(-50%)`;
             el.style.textShadow = '2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000';
-            el.style.transition = 'all 1s cubic-bezier(0.25, 1, 0.5, 1)';
+            
+            // Animación mejorada: Flota hacia arriba 2.5s. La opacidad empieza a bajar a los 1.5s
+            el.style.transition = 'top 2.5s cubic-bezier(0.25, 1, 0.5, 1), opacity 1s ease-in 1.5s';
             
             DOM.gameArea.appendChild(el);
 
-            // Animar flotación hacia el cielo
             requestAnimationFrame(() => {
                 requestAnimationFrame(() => {
-                    el.style.top = `15%`; // Sube hacia las nubes
+                    el.style.top = `10%`; // Sube hacia las nubes altas
                     el.style.opacity = '0';
                 });
             });
 
+            // Dura más tiempo antes de ser destruido
             setTimeout(() => {
                 el.remove();
-            }, 1000);
+            }, 2500);
         }
 
         function handleCollision(obs, index) {
@@ -607,14 +574,13 @@
             }
 
             if (obs.type === 'alien' && STATE.isJumping) {
-                // ALIEN JUMP CONSEGUIDO! 
                 if (!obs.scored) {
                     STATE.score += 100;
                     playSound(ASSETS.audio.jump); 
                     updateHUD();
                     
                     obs.scored = true;
-                    obs.disabled = true; // 1. Desaparece el hitbox
+                    obs.disabled = true; 
                     createSkyText("ALIEN JUMP!<br>+100", "#FFF110"); 
                 }
                 return; 
@@ -623,7 +589,6 @@
             // Impacto recibido
             if (STATE.hasShield) {
                 STATE.score += 100;
-                // Audios diferenciados
                 playSound(obs.type === 'rock' ? ASSETS.audio.explosion : ASSETS.audio.collision);
                 createSkyText("BOOM!<br>+100", "#FFA500");
                 createParticle(obs.type === 'alien' ? 'splatter' : 'explosion', obs.x, obs.lane);
@@ -637,10 +602,9 @@
                     }
                 }, 500);
                 
-                // Audios y texto rojo de "YOU SUCK"
                 playSound(obs.type === 'rock' ? ASSETS.audio.explosion : ASSETS.audio.collision);
                 createSkyText("YOU SUCK!", "#FF0000");
-                
+
                 createParticle(obs.type === 'alien' ? 'splatter' : 'explosion', obs.x, obs.lane);
                 handleHit(); 
             }
@@ -714,16 +678,17 @@
             };
 
             try {
-                if (db) {
-                    const lbRef = collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard');
-                    await addDoc(lbRef, scoreData);
-                } else {
-                    let localScores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
-                    localScores.push(scoreData);
-                    localStorage.setItem('nbfps_scores', JSON.stringify(localScores));
-                }
+                // Fetch al Google Sheets App Script (POST)
+                await fetch(GOOGLE_SHEETS_WEBHOOK, {
+                    method: 'POST',
+                    body: JSON.stringify(scoreData)
+                });
             } catch (e) {
-                console.error("Error saving score:", e);
+                console.error("Error al guardar score:", e);
+                // Fallback local por seguridad si falla el internet
+                let localScores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
+                localScores.push(scoreData);
+                localStorage.setItem('nbfps_scores', JSON.stringify(localScores));
             }
 
             document.getElementById('btn-submit-score').innerText = "SUBMIT";
@@ -736,25 +701,19 @@
             const listEl = document.getElementById('leaderboard-list');
             listEl.innerHTML = '<p class="text-center text-xs">LOADING...</p>';
 
-            let scores = [];
+            let top5 = [];
 
             try {
-                if (db) {
-                    const lbRef = collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard');
-                    const snapshot = await getDocs(lbRef);
-                    snapshot.forEach(doc => {
-                        scores.push(doc.data());
-                    });
-                } else {
-                    scores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
-                }
+                // Fetch al Google Sheets App Script (GET)
+                const response = await fetch(GOOGLE_SHEETS_WEBHOOK);
+                top5 = await response.json();
             } catch (e) {
-                console.error("Error loading scores:", e);
-                scores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
+                console.error("Error cargando leaderboard:", e);
+                // Fallback local
+                let scores = JSON.parse(localStorage.getItem('nbfps_scores') || '[]');
+                scores.sort((a, b) => b.score - a.score);
+                top5 = scores.slice(0, 5);
             }
-
-            scores.sort((a, b) => b.score - a.score);
-            const top5 = scores.slice(0, 5);
 
             listEl.innerHTML = '';
             if (top5.length === 0) {
